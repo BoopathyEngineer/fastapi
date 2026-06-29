@@ -1,12 +1,71 @@
-on: [push]
-permissions: { contents: read, security-events: write }
+name: Grype Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
-  g:
-    runs-on: ubuntu-latest
+  sbom-scan:
+    name: SBOM Scan
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: anchore/scan-action@v6
-        id: s
-        with: { path: ".", output-format: sarif, fail-build: 'false' }
-      - uses: github/codeql-action/upload-sarif@v3
-        with: { sarif_file: "${{ steps.s.outputs.sarif }}" }
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          retention-days: 90
+
+      - name: Scan SBOM (JSON - for gate)
+        id: grype-json
+        uses: anchore/scan-action@v6
+        with:
+          sbom: sbom.cdx.json
+          fail-build: 'false'
+          severity-cutoff: critical
+          output-format: json
+
+      - name: Scan SBOM (SARIF - for Security tab)
+        id: grype-sarif
+        if: always()
+        uses: anchore/scan-action@v6
+        with:
+          sbom: sbom.cdx.json
+          fail-build: 'false'
+          severity-cutoff: critical
+          output-format: sarif
+
+      - name: Upload Grype results to Security tab
+        if: always() && steps.grype-sarif.outputs.sarif != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ steps.grype-sarif.outputs.sarif }}
+          category: grype
+
+      - name: Summarize & gate on critical
+        if: always() && steps.grype-json.outcome != 'skipped'
+        run: |
+          F="${{ steps.grype-json.outputs.json }}"
+          CRIT=$(jq '[.matches[]|select(.vulnerability.severity=="Critical")]|length' "$F" 2>/dev/null||echo 0)
+          TOT=$(jq '.matches|length' "$F" 2>/dev/null||echo 0)
+          echo "Critical: $CRIT / Total: $TOT" >> $GITHUB_STEP_SUMMARY
+          [ "$CRIT" -gt 0 ] && { echo "::error::$CRIT critical CVEs"; exit 1; } || echo "OK"

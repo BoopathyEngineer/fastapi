@@ -1,0 +1,12 @@
+on: [push]
+permissions: { contents: read, security-events: write }
+jobs:
+  g:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anchore/scan-action@v6
+        id: s
+        with: { path: ".", output-format: sarif, fail-build: 'false' }
+      - uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: "${{ steps.s.outputs.sarif }}" }
